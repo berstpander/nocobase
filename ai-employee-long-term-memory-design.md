@@ -13,10 +13,12 @@ AI 员工的长期记忆设计。
 - 在不同规模公司中，长期记忆应能从“个人私有记忆”逐步扩展到“团队/员工/组织级记忆”，避免小公司配置过重，也避免大公司缺少治理。
 
 ## 1. 需求背景
-核心要点：
 
-- 当前 AI 员工已经具备“会话短期记忆”“运行状态恢复”和“知识库检索”，但还没有严格意义上的“跨会话、可治理、可审计、可淘汰”的长期记忆。
-- 长期记忆不建议直接等同于聊天记录、知识库或 LangGraph checkpoint。更合理的做法是新增独立的 Memory 模型：关系库保存可治理的记忆对象，向量索引用于语义召回，再通过统一的记忆管理器接入 AI 员工对话和工作流。
+当前 AI 员工已经具备会话上下文、运行状态恢复和知识库检索能力，可以在单次会话或任务中理解上下文并调用业务工具。但这些信息主要局限于当前会话、运行状态或管理员维护的知识资料，尚不能在不同会话之间持续沉淀用户偏好、任务背景、业务口径和员工经验。
+
+随着 AI 员工逐步进入 CRM、工单、审批、数据分析和项目管理等持续性业务场景，缺少长期记忆会导致用户重复提供背景、不同会话之间输出不一致、业务经验无法积累，也难以形成稳定的个性化协作关系。
+
+因此，需要在现有 AI 员工体系中增加跨会话的长期记忆能力，并确保记忆可管理、可追溯、可授权、可更新和可淘汰，使其能够在提升连续协作体验的同时满足企业数据治理要求。
 
 ### 1.1 NocoBase 业务场景适配
 
@@ -63,7 +65,7 @@ flowchart LR
   Medium --> EmployeeMemory["员工记忆"]
   Large --> WorkspaceMemory["工作区/组织记忆"]
 
-  UserMemory --> Architecture["同一 Memory 架构"]
+  UserMemory --> Architecture["统一的长期记忆能力"]
   EmployeeMemory --> Architecture
   WorkspaceMemory --> Architecture
 ```
@@ -74,7 +76,7 @@ flowchart LR
 | 中型公司 / 多团队 | 用户记忆 + 员工级记忆 + 管理员确认 | 团队协作、员工经验沉淀、权限边界 |
 | 大型组织 / 多角色多业务线 | 用户/员工/组织多层记忆、审计、配额、保留策略 | 合规、隔离、治理、可追溯 |
 
-因此，方案不能只设计一个简单的“聊天记忆表”，而要支持 scope、owner、permission、lifecycle、audit 等治理维度。
+长期记忆能力应支持按组织发展阶段逐步启用：小团队保持低配置和用户可控，中型公司加强团队协作与权限边界，大型组织进一步引入审计、合规和规模化治理能力。
 
 ## 2. 方案调研
 
@@ -82,13 +84,13 @@ flowchart LR
 
 #### 2.1.1 当前架构设计
 
-AI 员工位于 `plugin-ai` 中，向下依赖 NocoBase 的用户、权限、数据源、资源 API、工作流和文件能力，向外连接 LLM provider、MCP、知识库和向量存储。
+AI 员工模块向下依赖 NocoBase 的用户、权限、数据源、资源 API、工作流和文件能力，向外连接 LLM provider、MCP、知识库和向量存储。
 
-静态模块图(AI 员工由哪些能力模块组成)：
+AI 员工静态模块架构如下：
 
 ```mermaid
 flowchart TB
-  PluginAI["plugin-ai<br/>AI 员工插件"] --> Employee["AI Employee<br/>员工运行对象"]
+  PluginAI["AI 员工模块"] --> Employee["AI Employee<br/>员工运行对象"]
   PluginAI --> Config["AI Employee Config<br/>身份、提示词、模型、工具、知识库配置"]
   PluginAI --> Conversation["Conversation<br/>会话、消息、工具调用记录"]
   PluginAI --> Prompt["Prompt Builder<br/>系统提示词、会话消息、工作上下文、知识库结果"]
@@ -103,7 +105,7 @@ flowchart TB
   Agent --> Checkpoint["Checkpoint<br/>运行状态恢复"]
 ```
 
-运行时调用图：
+AI 员工运行时调用关系如下：
 
 ```mermaid
 flowchart TD
@@ -128,13 +130,7 @@ flowchart TD
   Agent --> ConvWrite["Conversation<br/>保存用户消息、AI 消息、工具消息"]
 ```
 
-这里的关键关系是：
-
-- Conversation 和 Prompt Builder 不是互相调用。
-- AI Employee 是本次请求的编排者。
-- AI Employee 先从 Conversation 读取历史消息，再把这些消息连同员工配置、工作上下文、知识库结果一起交给 Prompt Builder 组装。
-- Agent Runtime 使用 Prompt Builder 组装好的上下文调用 LLM，并在过程中调用工具。
-- 消息保存由 Agent Runtime 的会话中间件写回 Conversation。
+AI Employee 负责运行时编排：从 Conversation 获取会话历史，结合员工配置、工作上下文和知识库检索结果，由 Prompt Builder 形成模型上下文；Agent Runtime 基于该上下文调用 LLM 和工具，并通过会话中间件将用户消息、AI 回复和工具调用结果写回 Conversation。
 
 从职责上看，当前 AI 员工可以拆成这些粗粒度模块：
 
@@ -177,7 +173,7 @@ sequenceDiagram
   Agent->>Conv: 保存用户消息、AI 消息、工具消息
 ```
 
-这个链路里，AI 员工的“上下文来源”主要有四类：
+AI 员工运行时上下文由以下四类信息构成：
 
 - 员工配置：角色、系统提示词、模型、工具、技能、知识库设置。
 - 当前会话：近期用户消息、AI 回复、工具调用、附件、工作上下文。
@@ -187,46 +183,26 @@ sequenceDiagram
 #### 2.1.3 当前已有能力
 
 ```mermaid
-mindmap
-  root((AI 员工能力))
-    对话协作
-      多员工选择
-      会话列表
-      流式回答
-      附件和上下文
-    模型能力
-      多 LLM Provider
-      默认模型
-      员工专用模型
-      模型测试
-    工具能力
-      系统工具
-      自定义工具
-      工作流工具
-      MCP 工具
-      工具审批
-    技能能力
-      内置技能
-      按需加载
-      技能绑定工具
-    知识能力
-      知识库
-      向量检索
-      本地/只读/外部知识库
-    业务集成
-      工作流节点
-      任务处理
-      数据源上下文
-      权限控制
+%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 32, "rankSpacing": 36}}}%%
+flowchart TB
+  Root["AI 员工能力"]
+  Interaction["交互与上下文<br/>对话协作 · 工作上下文 · 知识检索"]
+  Intelligence["智能与编排<br/>多模型 · 技能加载 · Agent 编排"]
+  Execution["执行与治理<br/>工具调用 · 工作流任务 · 权限审批"]
+
+  Root --> Interaction
+  Root --> Intelligence
+  Root --> Execution
+
 ```
 
 当前设计已经比较完整地覆盖了“AI 员工如何工作”和“AI 员工如何安全地调用业务能力”。但它对“AI 员工如何长期记住用户和业务”支持有限。
 
 ### 2.2 当前记忆相关设计
 
-#### 2.2.1 现有三类“类记忆”能力
+#### 2.2.1 现有记忆相关能力
 
-当前系统里有三类和记忆接近的设计，但它们分别解决不同问题。
+当前系统包含三类记忆相关能力，分别服务于会话上下文、运行状态恢复和业务资料检索。
 
 ```mermaid
 flowchart LR
@@ -234,80 +210,22 @@ flowchart LR
   M2["Checkpoint<br/>LangGraph 状态"] --> P2["运行状态恢复<br/>中断、工具审批、续跑"]
   M3["知识库<br/>Knowledge Base + Vector Store"] --> P3["业务资料检索<br/>管理员维护的稳定知识"]
 
-  P1 --> Gap["还缺长期记忆"]
+  P1 --> Gap["长期记忆能力缺口"]
   P2 --> Gap
   P3 --> Gap
 
   Gap --> Need["跨会话、可确认、可编辑、可审计、可过期、可召回的 Memory"]
 ```
 
-| 类型 | 保存什么 | 解决什么问题 | 为什么不是长期记忆 |
+| 类型 | 保存内容 | 主要用途 | 与长期记忆的差异 |
 | --- | --- | --- | --- |
 | 会话消息 | 用户消息、AI 回复、工具调用、附件、工作上下文 | 当前会话连续对话 | 只面向 session，读取近期消息；没有抽取、合并、淘汰、跨会话召回 |
-| Checkpoint | LangGraph 运行状态、pending writes、channel values | 中断恢复、工具审批续跑 | 是运行时快照，会过期清理；不可读、不可管理、不可作为事实记忆 |
+| Checkpoint | LangGraph Agent 运行状态 | 中断恢复、工具审批续跑 | 是运行时快照，会过期清理；不用于保存跨会话的业务事实和用户偏好 |
 | 知识库 | 管理员维护的文档片段和向量索引 | RAG 检索业务资料 | 面向显式资料，不负责从交互中学习用户偏好或业务事实 |
 
-#### 2.2.2 LangGraph 在项目中的使用
+项目已使用 LangGraph checkpoint 持久化会话内的 Agent 运行状态，用于中断恢复和工具审批续跑。该能力属于运行状态管理，不等同于跨会话、可治理的长期记忆。
 
-当前项目通过 LangChain / LangGraph 来组织 AI 员工的 Agent 运行过程。这里的 LangGraph 主要承担“Agent 执行状态管理”，而不是“业务长期记忆管理”。
-
-```mermaid
-flowchart TB
-  Employee["AI Employee"] --> Agent["LangChain Agent<br/>createAgent"]
-  Agent --> Graph["LangGraph Runtime<br/>多轮模型调用、工具调用、中断恢复"]
-  Graph --> Checkpointer["Checkpoint Saver<br/>SequelizeCollectionSaver"]
-
-  Checkpointer --> LC1["lcCheckpoints"]
-  Checkpointer --> LC2["lcCheckpointBlobs"]
-  Checkpointer --> LC3["lcCheckpointWrites"]
-
-  Cleaner["Checkpoint Cleaner<br/>定时清理"] --> LC1
-  Cleaner --> LC2
-  Cleaner --> LC3
-```
-
-项目中的使用方式可以概括为：
-
-- AI 员工创建 Agent 时，为 main-agent 挂载基于数据库的 checkpointer。
-- 每个会话会有 thread id，用于把 LangGraph 的运行状态关联到当前 AI 会话。
-- 当模型发起工具调用、工具调用需要用户审批、或者对话需要续跑时，LangGraph checkpoint 用来恢复执行状态。
-- 系统会定时清理过期 checkpoint，避免运行状态长期堆积。
-
-LangGraph 本身具备“状态持久化”和“线程级 checkpoint”能力，也可以被很多 Agent 框架用来实现短期记忆或会话状态恢复。但在当前项目中，它的作用边界是：
-
-| 能力 | LangGraph 是否具备 | 当前项目是否使用 | 是否等同长期记忆 |
-| --- | --- | --- | --- |
-| 保存 Agent 运行状态 | 是 | 是 | 否 |
-| 恢复中断执行 | 是 | 是 | 否 |
-| 保存工具调用过程 | 是 | 是 | 否 |
-| 保存当前会话的上下文状态 | 可以 | 部分使用，主要通过 checkpoint 和会话消息共同完成 | 否 |
-| 跨会话长期记住用户偏好 | 不直接提供业务治理模型 | 未使用 | 否 |
-| 记忆确认、编辑、审计、淘汰 | 不属于 LangGraph checkpoint 的职责 | 未使用 | 否 |
-
-因此，LangGraph checkpoint 可以理解为“运行态记忆”或“执行状态记忆”，它回答的是：
-
-- 上一次 Agent 执行到哪里了？
-- 哪个工具调用还在等待？
-- 用户审批后应该从哪个状态继续？
-
-长期记忆要回答的是：
-
-- 这个用户长期偏好什么？
-- 这个 AI 员工在业务场景中应该长期记住什么经验？
-- 哪些业务事实可以跨会话复用？
-- 用户和管理员如何查看、确认、修改、删除这些记忆？
-
-这两类问题不同，所以长期记忆不应直接建立在 LangGraph checkpoint 上，而应独立建模，再在 Agent 运行前作为上下文输入给 LangGraph / LLM。
-
-```mermaid
-flowchart LR
-  RuntimeMemory["LangGraph Checkpoint<br/>运行状态"] --> Resume["恢复执行"]
-  LongTermMemory["长期记忆<br/>用户偏好、业务事实、员工经验"] --> Prompt["注入 Prompt"]
-  Prompt --> Agent["LangGraph Agent"]
-  Resume --> Agent
-```
-
-#### 2.2.3 当前记忆边界
+#### 2.2.2 当前记忆边界
 
 ```mermaid
 flowchart TB
@@ -327,7 +245,7 @@ flowchart TB
 - 未完成工具调用或中断审批所需的运行状态。
 - 员工配置中固定写入的提示词、知识库、模型和工具。
 
-当前 AI 员工还不能稳定做到：
+现有能力缺口：
 
 - 用户说过的偏好，下次新会话自动生效。
 - 某个员工在多次交互中积累工作经验。
@@ -337,7 +255,7 @@ flowchart TB
 
 ### 2.3 外部方案参考
 
-长期记忆不是 coding agent 独有能力。更值得参考的是通用助手、陪伴类产品和专门的 agent memory 基础设施。不同类型产品对 memory 的侧重点不同：
+外部参考覆盖通用助手、陪伴类产品、Agent Memory 基础设施和 Coding Agent。不同类型产品对 Memory 的侧重点如下：
 
 - Coding agent 更关注“项目规则、用户偏好、工作目录上下文”。
 - 通用助手更关注“个性化、来源可解释、用户可管理、隐私控制”。
@@ -358,7 +276,7 @@ flowchart TB
 | Replika | 陪伴关系高度依赖长期互动、人格连续性和用户画像；公开资料显示用户会和 AI 形成持续关系，产品也因此面临隐私、安全和情感依赖风险 | 长期记忆会显著增强“连续性”和信任感，但业务系统必须避免过度拟人化和不可控情感依赖；需要明确边界、敏感信息策略和删除能力 |
 | Character.AI / 角色聊天类 | 角色设定、示例对话、用户反馈共同塑造角色表现；核心价值是角色一致性和长期对话体验，但公开资料对底层长期记忆实现披露有限 | AI 员工也需要“角色一致性”，但更适合通过员工配置、员工级记忆、业务规则记忆实现，而不是无限制记住所有聊天细节 |
 
-陪伴类产品的启发不是“照搬情感陪伴机制”，而是说明：长期记忆越强，用户越会期待 AI 有稳定身份和连续理解。因此 NocoBase 的 AI 员工长期记忆必须更重视治理：
+陪伴类产品体现了长期记忆对身份连续性和用户信任的价值。NocoBase 不引入情感依赖设计，重点强化以下治理能力：
 
 - 用户知道 AI 记住了什么。
 - 管理员知道员工级记忆从哪里来。
@@ -405,7 +323,7 @@ flowchart LR
 
 NocoBase 更适合采用“结构化 Memory + 向量召回 + 权限治理”的方案，因为 NocoBase 本身是业务系统平台，需要和用户、角色、业务数据、工作流和审计体系结合。
 
-进一步的设计取舍：
+外部方案借鉴路径：
 
 - 第一阶段借鉴 ChatGPT / Gemini：显式记忆、用户可见、可删除、临时不记忆。
 - 第一阶段借鉴 Mem0：标准化 add/search/update/delete，支持 metadata filter。
@@ -428,7 +346,7 @@ NocoBase 更适合采用“结构化 Memory + 向量召回 + 权限治理”的�
 - 可淘汰：过期、冲突、低价值或长期不用的记忆可以被归档或丢弃。
 - 可控风险：默认不把敏感信息自动保存；自动记忆应可关闭或走确认。
 
-不建议做的事：
+非目标：
 
 - 不把完整聊天记录当长期记忆。
 - 不把 checkpoint 当长期记忆。
@@ -608,7 +526,7 @@ flowchart TB
   Session -.当前任务.-> Prompt
 ```
 
-推荐优先支持：
+建设优先级：
 
 1. 用户记忆：最直接提升体验，风险可由用户管理。
 2. 员工记忆：让某个 AI 员工积累领域工作方式和固定业务上下文。
@@ -618,28 +536,17 @@ flowchart TB
 #### 3.3.3 记忆类型
 
 ```mermaid
-mindmap
-  root((Memory Types))
-    Preference["偏好"]
-      语言
-      输出格式
-      工作方式
-    Fact["事实"]
-      用户业务信息
-      项目背景
-      稳定约定
-    Task["任务背景"]
-      当前目标
-      长期项目
-      阶段计划
-    BusinessRule["业务规则"]
-      指标口径
-      审批规则
-      数据解释
-    NegativePreference["负向偏好"]
-      不要做什么
-      不要记什么
-      避免的风格
+%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 32, "rankSpacing": 36}}}%%
+flowchart TB
+  Root["长期记忆类型"]
+  Personal["个人协作记忆<br/>偏好 · 负向偏好 · 协作习惯"]
+  Business["业务知识记忆<br/>业务事实 · 规则口径 · 稳定约定"]
+  Task["任务过程记忆<br/>当前目标 · 长期项目 · 阶段计划"]
+
+  Root --> Personal
+  Root --> Business
+  Root --> Task
+
 ```
 
 不同类型的记忆应有不同策略：
@@ -650,7 +557,7 @@ mindmap
 - 业务规则类：更适合员工级或工作区级，建议管理员确认。
 - 负向偏好类：优先级高，例如“不要记住我的手机号”。
 
-### 3.4 长期记忆如何管理和存储
+### 3.4 长期记忆管理与存储
 
 #### 3.4.1 存储设计
 
@@ -666,12 +573,12 @@ flowchart LR
   Filter --> Result["可注入记忆"]
 ```
 
-推荐采用“双层存储”：
+存储采用双层架构：
 
 - 关系库：保存记忆权威对象、权限、状态、来源、生命周期、审计信息。
 - 向量索引：保存 active 记忆的可检索文本和必要过滤 metadata。
 
-这样设计的原因：
+选型依据：
 
 - 仅有关系库不利于语义召回。
 - 仅有向量库不利于权限、审计、生命周期和用户管理。
@@ -721,7 +628,7 @@ flowchart LR
 - 工作区级记忆必须管理员确认。
 - 待确认、拒绝、归档、过期的记忆默认不参与模型召回。
 
-### 3.5 长期记忆如何增加、更新和丢弃
+### 3.5 长期记忆生命周期
 
 #### 3.5.1 增加记忆
 
@@ -741,7 +648,7 @@ flowchart TB
   Active --> Index["写入向量索引"]
 ```
 
-第一阶段推荐：
+第一阶段策略：
 
 - 默认关闭自动记忆。
 - 默认采用“AI 建议 + 用户确认”模式。
@@ -811,7 +718,7 @@ stateDiagram-v2
 - 超过用户或员工记忆配额。
 - 被策略识别为敏感或低质量。
 
-推荐采用“先归档/过期，后清理”的方式，除非用户明确要求删除。
+淘汰机制默认采用“先归档或过期，后清理”的方式；用户明确要求删除时直接进入删除流程。
 
 ## 4. 使用流程
 
@@ -855,7 +762,7 @@ flowchart TB
   Tools["工具和技能说明"] --> Prompt
 ```
 
-推荐注入格式：
+长期记忆注入格式示例：
 
 ```xml
 <long_term_memory>
@@ -1051,36 +958,11 @@ flowchart TB
 | 与知识库混淆 | 模型分不清个人偏好和组织知识 | 分区注入；不同对象模型和管理入口 |
 | 自动写入失控 | 对话越多，低质量记忆越多 | 建议保存优先；自动抽取后置；淘汰机制 |
 
-## 8. 验证结论
-
-### 8.1 是否结合 NocoBase 业务场景
-
-是。方案已经把长期记忆放在 NocoBase 的数据、权限、工作流、知识库、页面上下文和 AI 员工体系中设计，而不是作为独立聊天机器人的记忆功能。它覆盖 CRM、工单、审批、数据分析、项目管理、本地化等典型业务系统场景。
-
-### 8.2 是否适配不同规模公司
-
-是。方案通过 `scope` 和治理能力分层适配不同规模：
-
-- 小团队：只启用用户私有记忆和手动/建议保存。
-- 中型公司：增加员工级记忆和管理员确认。
-- 大型组织：增加组织级记忆、审计、配额、过期、合规保留和敏感信息策略。
-
-### 8.3 是否包含要求章节
-
-| 要求章节 | 文档位置 | 是否覆盖 |
-| --- | --- | --- |
-| 0. 需求主题 | `0. 需求主题` | 是 |
-| 1. 需求背景 | `1. 需求背景` | 是 |
-| 2. 方案调研 | `2. 方案调研` | 是 |
-| 3. 技术实现 | `3. 技术实现` | 是 |
-| 4. 使用流程 | `4. 使用流程` | 是 |
-| 5. 主要界面 | `5. 主要界面` | 是 |
-
-## 9. 总结
+## 8. 总结
 
 AI 员工当前已经具备短期会话上下文、运行状态恢复和知识库检索，但这些能力都不是完整长期记忆。长期记忆应作为独立域模型建设，围绕 Memory 对象提供保存、确认、检索、注入、更新、归档、删除和审计能力。
 
-推荐的长期记忆架构是：
+长期记忆总体架构：
 
 ```mermaid
 flowchart LR
@@ -1094,11 +976,11 @@ flowchart LR
   Use --> Improve["提升跨会话协作"]
 ```
 
-这个方案能与当前 AI 员工架构自然结合，同时保持长期记忆可解释、可管理、可审计、可淘汰。
+该方案与当前 AI 员工架构保持兼容，并确保长期记忆可解释、可管理、可审计、可淘汰。
 
-## 10. 参考文献
+## 9. 参考文献
 
-### 10.1 通用助手类
+### 9.1 通用助手类
 
 1. OpenAI Help Center: ChatGPT Memory FAQ  
    https://help.openai.com/en/articles/8590148-memory-faq
@@ -1107,7 +989,7 @@ flowchart LR
 3. The Verge: Google's Gemini chatbot can now remember things about you  
    https://www.theverge.com/2024/11/19/24300709/google-gemini-chatbot-memory
 
-### 10.2 陪伴类 / 角色类产品
+### 9.2 陪伴类 / 角色类产品
 
 1. Replika official site  
    https://replika.com/
@@ -1116,7 +998,7 @@ flowchart LR
 3. Character.AI official site  
    https://character.ai/
 
-### 10.3 Agent Memory 基础设施类
+### 9.3 Agent Memory 基础设施类
 
 1. Mem0 Documentation: Overview  
    https://docs.mem0.ai/platform/overview
@@ -1127,7 +1009,7 @@ flowchart LR
 4. LangChain Documentation: Memory  
    https://docs.langchain.com/oss/python/concepts/memory
 
-### 10.4 Coding Agent 类
+### 9.4 Coding Agent 类
 
 1. Anthropic Documentation: Claude Code Memory  
    https://docs.anthropic.com/en/docs/claude-code/memory
